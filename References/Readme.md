@@ -71,15 +71,9 @@ And add `void *_sbrk(ptrdiff_t inc);` to line 32 in `sysmem.c`.
 ## Useful macros:
 
 ### Compiler time (aka static) assert
+Usage (C11):
 ```C
-#define ASSERT_CONCAT_(a, b) a##b
-#define ASSERT_CONCAT(a, b) ASSERT_CONCAT_(a, b)
-#define compile_assert(e) enum { ASSERT_CONCAT(assert_line_, __LINE__) = 1/(!!(e)) }
-// From: http://www.pixelbeat.org/programming/gcc/static_assert.html
-```
-Usage:
-```C
-compile_assert(sizeof(my_struct_t) == 4);
+static_assert(sizeof(my_struct_t) == 4);
 ```
 
 

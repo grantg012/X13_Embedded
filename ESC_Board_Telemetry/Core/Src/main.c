@@ -139,7 +139,9 @@ typedef enum {
 #define NUM_CAN_TX_QUEUE_MESSAGES 5
 
 #define SEND_ID_INC 0x100U
+#define SELF_TEMP_INC 0x20U
 #define SEND_ID (canId + SEND_ID_INC)
+#define SEND_ID_SELF_TEMP (SEND_ID + SELF_TEMP_INC)
 
 #define voltToKISSFormat(volt) (volt * 100U)
 
@@ -148,8 +150,10 @@ typedef enum {
 #define ROV_VOLT_MAX_KISS 4060U
 #define ROV_VOLT_DIVISOR ((ROV_VOLT_MAX_KISS - ROV_VOLT_MIN_KISS) / UINT8_MAX)
 
+#define SELF_TEMP_MSG_LEN 1
+
 // Assert that the divisor is a whole number.
-compile_assert((float)ROV_VOLT_DIVISOR == ((ROV_VOLT_MAX_KISS - ROV_VOLT_MIN_KISS) / (float)UINT8_MAX));
+static_assert((float)ROV_VOLT_DIVISOR == ((ROV_VOLT_MAX_KISS - ROV_VOLT_MIN_KISS) / (float)UINT8_MAX), "Math is wrong");
 
 /* USER CODE END PD */
 
@@ -183,6 +187,8 @@ static uint8_t telemetryBuffer[KISS_CRC_COUNT] = {0};
 static volatile uint8_t telemetryBytesRecieved;
 static uint8_t uartRxBuffer;
 static volatile uint8_t sendTelemetry;
+static volatile uint8_t sendTemperature;
+static volatile uint32_t rawTemperatureData;
 // Not sure if some of the above variables should or shouldn't be volatile so that
 // main properly checks them after the interrupt modifies them.
 /* USER CODE END PV */
@@ -215,6 +221,7 @@ void TIM16_TimeElapsedCallback(TIM_HandleTypeDef *_htim);
 
 static uint8_t packROVVolt(uint16_t kissVolt);
 static void sendTelemetryData(void);
+static void sendTemperatureData(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -287,6 +294,10 @@ int main(void)
 			}
 			telemetryBytesRecieved = 0;
 			sendTelemetry = 0;
+		}
+		if(sendTemperature) {
+			sendTemperatureData();
+			sendTemperature = 0;
 		}
 		asm volatile("wfi");
     }
@@ -378,13 +389,6 @@ static void MX_ADC_Init(void)
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
   sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /** Configure for the selected ADC regular channel to be converted.
-  */
-  sConfig.Channel = ADC_CHANNEL_4;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -726,41 +730,64 @@ void ADC_ConversionCompleteCallback(ADC_HandleTypeDef *_hadc)
 {
 	uint32_t adcValue = HAL_ADC_GetValue(_hadc);
 
-	switch(adcValue) {
-		case CAN_ID_201_LOW_THRESHOLD ... CAN_ID_201_HIGH_THRESHOLD:
-			canId = 0x201;
-			htim14.Init.Period = CAN_ID_201_FLASH_MS - 1;
-			break;
-		case CAN_ID_202_LOW_THRESHOLD ... CAN_ID_202_HIGH_THRESHOLD:
-			canId = 0x202;
-			htim14.Init.Period = CAN_ID_202_FLASH_MS - 1;
-			break;
-		case CAN_ID_203_LOW_THRESHOLD ... CAN_ID_203_HIGH_THRESHOLD:
-			canId = 0x203;
-			htim14.Init.Period = CAN_ID_203_FLASH_MS - 1;
-			break;
-		case CAN_ID_206_LOW_THRESHOLD ... CAN_ID_206_HIGH_THRESHOLD:
-			canId = 0x206;
-			htim14.Init.Period = CAN_ID_206_FLASH_MS - 1;
-			break;
-		default:
-			htim14.Init.Period = ERROR_FLASH_MS - 1;
-			break;
+	if(!adcConfigured) {
+		switch(adcValue) {
+			case CAN_ID_201_LOW_THRESHOLD ... CAN_ID_201_HIGH_THRESHOLD:
+				canId = 0x201;
+				htim14.Init.Period = CAN_ID_201_FLASH_MS - 1;
+				break;
+			case CAN_ID_202_LOW_THRESHOLD ... CAN_ID_202_HIGH_THRESHOLD:
+				canId = 0x202;
+				htim14.Init.Period = CAN_ID_202_FLASH_MS - 1;
+				break;
+			case CAN_ID_203_LOW_THRESHOLD ... CAN_ID_203_HIGH_THRESHOLD:
+				canId = 0x203;
+				htim14.Init.Period = CAN_ID_203_FLASH_MS - 1;
+				break;
+			case CAN_ID_206_LOW_THRESHOLD ... CAN_ID_206_HIGH_THRESHOLD:
+				canId = 0x206;
+				htim14.Init.Period = CAN_ID_206_FLASH_MS - 1;
+				break;
+			default:
+				htim14.Init.Period = ERROR_FLASH_MS - 1;
+				break;
+		}
+
+		// Restart TIM14 to flash PA15 LED
+		HAL_ADC_Stop_IT(_hadc);
+
+		// Configure CAN Filter for Thrusters and
+		#if FILTER_AND_QUEUE
+			CAN_ConfigureFilterForThrusterOperation();
+		#endif
+		HAL_CAN_Start(&hcan);  // Enters Normal Operating Mode
+
+		// Restart TIM14 to flash PA15 LED
+		htim14.Instance->ARR = htim14.Init.Period;
+		HAL_TIM_Base_Start_IT(&htim14);
+
+		// Disable the ID pin channel
+		ADC_ChannelConfTypeDef sConfig = {0};
+		sConfig.Channel = ADC_CHANNEL_0;
+		sConfig.Rank = ADC_RANK_NONE;
+		sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+		if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
+		{
+			Error_Handler();
+		}
+		// Enable the internal temperature sensor
+		sConfig.Channel = ADC_CHANNEL_16;
+		sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
+		sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+		if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
+		{
+			Error_Handler();
+		}
+	} else {
+		rawTemperatureData = HAL_ADC_GetValue(_hadc);
+		// Stop sampling
+		HAL_ADC_Stop_IT(_hadc);
 	}
-
-	// Restart TIM14 to flash PA15 LED
-	HAL_ADC_Stop_IT(_hadc);
-
-	// Configure CAN Filter for Thrusters and
-#if FILTER_AND_QUEUE
-	CAN_ConfigureFilterForThrusterOperation();
-#endif
-	HAL_CAN_Start(&hcan);  //  Enters Normal Operating Mode
-
-	// Restart TIM14 to flash PA15 LED
-	htim14.Instance->ARR = htim14.Init.Period;
-	HAL_TIM_Base_Start_IT(&htim14);
-
 }
 
 void TIM14_TimeElapsedCallback(TIM_HandleTypeDef *_htim)
@@ -772,6 +799,7 @@ void TIM14_TimeElapsedCallback(TIM_HandleTypeDef *_htim)
 		adcConfigured = 1;
 	} else {
 		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_15);
+		HAL_ADC_Start_IT(&hadc);  // Start ADC sampling for internal temperature
 	}
 }
 
@@ -881,6 +909,19 @@ void sendTelemetryData(void) {
 	canSendPacket.data[ROV_ERPM_LOW] = telemetryBuffer[KISS_ERPM_LOW];
 	canSendPacket.canTxHeader.StdId = SEND_ID;
 	canSendPacket.canTxHeader.DLC = ROV_TLM_COUNT;
+	SendCANMessage(&canSendPacket);
+}
+
+void sendTemperatureData(void)
+{
+	CanTxData canSendPacket;
+
+	const uint16_t *TEMP110_CAL_ADDR = ((uint16_t*) ((uint32_t) 0x1FFFF7C2));
+	const uint16_t *TEMP30_CAL_ADDR = ((uint16_t*) ((uint32_t) 0x1FFFF7B8));
+	float temperature = (110.0f - 30.0f) / (float)(*TEMP110_CAL_ADDR - *TEMP30_CAL_ADDR) * (float)(rawTemperatureData - *TEMP30_CAL_ADDR) + 30.0f;
+	canSendPacket.data[0] = (uint8_t)(temperature * 4.0f);
+	canSendPacket.canTxHeader.StdId = SEND_ID_SELF_TEMP;
+	canSendPacket.canTxHeader.DLC = SELF_TEMP_MSG_LEN;
 	SendCANMessage(&canSendPacket);
 }
 

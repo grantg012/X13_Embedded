@@ -16,11 +16,6 @@
 
 typedef uint_fast8_t uint8_ft;
 
-// Compile time assert
-#define ASSERT_CONCAT_(a, b) a##b
-#define ASSERT_CONCAT(a, b) ASSERT_CONCAT_(a, b)
-#define compile_assert(e) enum { ASSERT_CONCAT(assert_line_, __LINE__) = 1/(!!(e)) }
-// From: http://www.pixelbeat.org/programming/gcc/static_assert.html
 
 // Number of elements in a statically allocated array macro
 #define N_ELEMENTS(ARR) (sizeof(ARR) / sizeof(ARR[0]))
