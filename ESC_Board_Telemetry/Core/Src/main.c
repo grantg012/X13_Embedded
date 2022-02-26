@@ -44,6 +44,7 @@
 /* USER CODE BEGIN Includes */
 #include <assert.h>
 #include <stdint.h>
+#include <cmsis_compiler.h>
 
 #include "common.h"
 #define FILTER_AND_QUEUE 0
@@ -199,7 +200,6 @@ static void MX_TIM16_Init(void);
 /* USER CODE BEGIN PFP */
 
 void EnablePWMOutput(TIM_HandleTypeDef *_htim);
-static uint32_t byte_to_pwm(uint8_t byte);
 
 #if FILTER_AND_QUEUE
 static void CAN_ConfigureFilterForThrusterOperation(void);
@@ -288,7 +288,7 @@ int main(void)
 			telemetryBytesRecieved = 0;
 			sendTelemetry = 0;
 		}
-		asm volatile("wfi");
+		__WFI();
     }
   /* USER CODE END 3 */
 }
@@ -479,9 +479,9 @@ static void MX_TIM3_Init(void)
   //  TIM3 Count will reset every 10ms
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 160 - 1;
+  htim3.Init.Prescaler = 32 - 1;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 500 - 1;
+  htim3.Init.Period = 1500 - 1;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
@@ -495,7 +495,7 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 75;
+  sConfigOC.Pulse = 375;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
@@ -714,10 +714,10 @@ void CAN_FIFO0_RXMessagePendingCallback(CAN_HandleTypeDef *_hcan)
 
 	htim3.Instance->CR1 |= TIM_CR1_UDIS;  //  Disable UEV Generation
 
-	htim3.Instance->CCR1 = byte_to_pwm(data[0]);
-	htim3.Instance->CCR2 = byte_to_pwm(data[1]);
-	htim3.Instance->CCR3 = byte_to_pwm(data[2]);
-	htim3.Instance->CCR4 = byte_to_pwm(data[3]);
+	htim3.Instance->CCR1 = data[0] + 250u;
+	htim3.Instance->CCR2 = data[1] + 250u;
+	htim3.Instance->CCR3 = data[2] + 250u;
+	htim3.Instance->CCR4 = data[3] + 250u;
 
 	htim3.Instance->CR1 &= ~TIM_CR1_UDIS;  //  Re-enable UEV Generation
 }
@@ -822,14 +822,6 @@ void EnablePWMOutput(TIM_HandleTypeDef *_htim)
 
 	//  Enable Timer Counter
 	_htim->Instance->CR1 |= TIM_CR1_CEN;
-}
-
-//  Imported from X12 ESC Code
-uint32_t byte_to_pwm(uint8_t byte)
-{
-	float exact;
-	exact = (uint32_t)byte * (40.0F/255.0F) + 55.0F;
-	return (uint32_t) (exact + 0.5F); //rounds up the integer by adding 0.5
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
