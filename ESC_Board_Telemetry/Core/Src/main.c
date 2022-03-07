@@ -134,8 +134,6 @@ typedef enum {
 #define CAN_ID_206_FLASH_MS 2000
 #define ERROR_FLASH_MS 4000
 
-#define CAN_ID_RIR_SHIFT_AMOUNT 21
-
 #define NUM_CAN_TX_QUEUE_MESSAGES 5
 
 #define SEND_ID_INC 0x100U
@@ -702,7 +700,7 @@ void CAN_FIFO0_RXMessagePendingCallback(CAN_HandleTypeDef *_hcan)
 	SET_BIT(_hcan->Instance->RF0R, CAN_RF0R_RFOM0);
 
 #if defined(DEBUG) || !FILTER_AND_QUEUE
-	if(_hcan->Instance->sFIFOMailBox[0].RIR >> CAN_ID_RIR_SHIFT_AMOUNT != canId) {
+	if(_hcan->Instance->sFIFOMailBox[0].RIR >> CAN_RI0R_STID_Pos != canId) {
 		uint8_t REEE = 0xFF;
 		(void)REEE;
 		Error_Handler();
