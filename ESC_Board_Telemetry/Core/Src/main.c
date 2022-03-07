@@ -60,7 +60,9 @@
 #pragma GCC diagnostic warning "-Wredundant-decls"
 #pragma GCC diagnostic warning "-Wswitch-default"
 #pragma GCC diagnostic warning "-Wswitch-enum"
-
+#ifdef DEBUG
+#pragma GCC optimize ("O0")
+#endif
 
 /* USER CODE END Includes */
 
@@ -73,7 +75,7 @@ typedef struct
 	uint8_t data[8];
 } CanTxData;
 
-typedef enum {
+enum {
 	KISS_TEMP = 0,
 	KISS_VOLT_HIGH,
 	KISS_VOLT_LOW,
@@ -86,9 +88,9 @@ typedef enum {
 	KISS_CRC,
 	KISS_NO_CRC_COUNT = KISS_CRC,
 	KISS_CRC_COUNT
-} kiss_tlm_index_t;
+};
 
-typedef enum {
+enum {
 	ROV_TEMP = 0,
 	ROV_VOLT,
 	ROV_CURRENT_HIGH,
@@ -98,7 +100,16 @@ typedef enum {
 	ROV_ERPM_HIGH,
 	ROV_ERPM_LOW,
 	ROV_TLM_COUNT
-} rov_tlm_index_t;
+};
+
+typedef enum __attribute__ ((__packed__)) {
+	TLM_INIT,
+	TLM_READY_TO_REQUEST,
+	TLM_REQUESTING,
+	TLM_RECEIVING,
+	TLM_RECEIVED,
+	TLM_TRANSMITTING,
+} tlm_state_t;
 
 
 /* USER CODE END PTD */
@@ -138,6 +149,16 @@ typedef enum {
 #define CAN_ID_RIR_SHIFT_AMOUNT 21
 
 #define NUM_CAN_TX_QUEUE_MESSAGES 5
+
+/** The count in the CCR to get a 1000 us pulse for a sys clock of 8 MHz and a
+ * prescaler of 32.
+ */
+#define PULSE_COUNT_1000_US (250u)
+/** The count in the CCR to get a <= 30us pulse for a sys clock of 8 MHz and a
+ * prescaler of 32. A short enough pulse like that requests telemetry from the
+ * ESC.
+ */
+#define TLM_PULSE_COUNT (7u)
 
 #define SEND_ID_INC 0x100U
 #define SEND_ID (canId + SEND_ID_INC)
@@ -181,9 +202,11 @@ CanTxData canTxData[NUM_CAN_TX_QUEUE_MESSAGES];
 CanTxData canTxPrivateMessageToSend;
 
 static uint8_t telemetryBuffer[KISS_CRC_COUNT] = {0};
-static volatile uint8_t telemetryBytesRecieved;
+static volatile uint8_t telemetryBytesRecieved = 0;
 static uint8_t uartRxBuffer;
-static volatile uint8_t sendTelemetry;
+static volatile uint8_t telemetryEscIndex = 0;
+static volatile uint32_t lastEscSpeeds = 0x7D7D7D7D;
+static volatile tlm_state_t tlm_state = TLM_INIT;
 // Not sure if some of the above variables should or shouldn't be volatile so that
 // main properly checks them after the interrupt modifies them.
 /* USER CODE END PV */
@@ -210,11 +233,14 @@ void SendCANMessage(CanTxData *canTxDataToSend);
 void CAN_FIFO0_RXMessagePendingCallback(CAN_HandleTypeDef *_hcan);
 void CAN_TxRequestCompleteCallback(CAN_HandleTypeDef *_hcan);
 void ADC_ConversionCompleteCallback(ADC_HandleTypeDef *_hadc);
+void TIM3_TimeElapsedCallback(TIM_HandleTypeDef *_htim);
 void TIM14_TimeElapsedCallback(TIM_HandleTypeDef *_htim);
 void TIM16_TimeElapsedCallback(TIM_HandleTypeDef *_htim);
 
 static uint8_t packROVVolt(uint16_t kissVolt);
 static void sendTelemetryData(void);
+static void requestTelemetry(uint8_t index);
+static void updatePwms(uint32_t data_32);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -281,12 +307,23 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-		if(sendTelemetry) {
-			if(telemetryBytesRecieved >= KISS_NO_CRC_COUNT) {
+		switch(tlm_state) {
+			case TLM_INIT:
+				break;
+			case TLM_READY_TO_REQUEST:
+				requestTelemetry(telemetryEscIndex);
+				break;
+			case TLM_REQUESTING:
+				break;
+			case TLM_RECEIVING:
+				break;
+			case TLM_RECEIVED:
 				sendTelemetryData();
-			}
-			telemetryBytesRecieved = 0;
-			sendTelemetry = 0;
+				break;
+			case TLM_TRANSMITTING:
+				break;
+			default:
+				break;
 		}
 		__WFI();
     }
@@ -447,12 +484,10 @@ static void MX_CAN_Init(void)
 #endif
 
   //  Enable TX Request Complete Interrupt
-#if FILTER_AND_QUEUE
   HAL_CAN_ActivateNotification(&hcan, CAN_IT_TX_MAILBOX_EMPTY);
   HAL_CAN_RegisterCallback(&hcan, HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID, CAN_TxRequestCompleteCallback);
   HAL_CAN_RegisterCallback(&hcan, HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID, CAN_TxRequestCompleteCallback);
   HAL_CAN_RegisterCallback(&hcan, HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID, CAN_TxRequestCompleteCallback);
-#endif
 
   /* USER CODE END CAN_Init 2 */
 
@@ -515,6 +550,8 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM3_Init 2 */
+
+  	HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID, TIM3_TimeElapsedCallback);
 
   /* USER CODE END TIM3_Init 2 */
   HAL_TIM_MspPostInit(&htim3);
@@ -696,7 +733,6 @@ static void CAN_ConfigureFilterForThrusterOperation(void)
 void CAN_FIFO0_RXMessagePendingCallback(CAN_HandleTypeDef *_hcan)
 {
 	uint32_t data_32 = _hcan->Instance->sFIFOMailBox[0].RDHR;
-	uint8_t *data = (uint8_t *)&data_32;
 
 	//  Release Output Mailbox
 	SET_BIT(_hcan->Instance->RF0R, CAN_RF0R_RFOM0);
@@ -712,12 +748,20 @@ void CAN_FIFO0_RXMessagePendingCallback(CAN_HandleTypeDef *_hcan)
 
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
 
+	updatePwms(data_32);
+}
+
+void updatePwms(uint32_t data_32)
+{
+	uint8_t *data = (uint8_t *)&data_32;
+	lastEscSpeeds = data_32;
+
 	htim3.Instance->CR1 |= TIM_CR1_UDIS;  //  Disable UEV Generation
 
-	htim3.Instance->CCR1 = data[0] + 250u;
-	htim3.Instance->CCR2 = data[1] + 250u;
-	htim3.Instance->CCR3 = data[2] + 250u;
-	htim3.Instance->CCR4 = data[3] + 250u;
+	htim3.Instance->CCR1 = data[0] + PULSE_COUNT_1000_US;
+	htim3.Instance->CCR2 = data[1] + PULSE_COUNT_1000_US;
+	htim3.Instance->CCR3 = data[2] + PULSE_COUNT_1000_US;
+	htim3.Instance->CCR4 = data[3] + PULSE_COUNT_1000_US;
 
 	htim3.Instance->CR1 &= ~TIM_CR1_UDIS;  //  Re-enable UEV Generation
 }
@@ -761,6 +805,7 @@ void ADC_ConversionCompleteCallback(ADC_HandleTypeDef *_hadc)
 	htim14.Instance->ARR = htim14.Init.Period;
 	HAL_TIM_Base_Start_IT(&htim14);
 
+	tlm_state = TLM_READY_TO_REQUEST;
 }
 
 void TIM14_TimeElapsedCallback(TIM_HandleTypeDef *_htim)
@@ -775,19 +820,25 @@ void TIM14_TimeElapsedCallback(TIM_HandleTypeDef *_htim)
 	}
 }
 
-#if FILTER_AND_QUEUE
 void CAN_TxRequestCompleteCallback(CAN_HandleTypeDef *_hcan)
 {
+	(void)_hcan;
+	if(tlm_state == TLM_TRANSMITTING) {
+		tlm_state = TLM_READY_TO_REQUEST;
+		telemetryEscIndex = telemetryEscIndex > 3 ? 0u : telemetryEscIndex + 1u;
+	}
+
+#if FILTER_AND_QUEUE
 	uint32_t txMailboxNumber;
 	CanTxData *canTxDataToSend;
-
 	if (!isQueueEmpty(canTxQueueHandle) && HAL_CAN_GetTxMailboxesFreeLevel(_hcan) > 0)
 	{
 		RemoveFromQueue(canTxQueueHandle, (void **)&canTxDataToSend);
 		HAL_CAN_AddTxMessage(_hcan, &(canTxDataToSend->canTxHeader), canTxDataToSend->data, &txMailboxNumber);
 	}
-}
 #endif
+}
+
 
 void SendCANMessage(CanTxData *canTxDataToSend)
 {
@@ -839,12 +890,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		// Stop timer
 		HAL_TIM_Base_Stop_IT(&htim16);
 		TIM16->CNT = 0;
-		sendTelemetry = 1;
+		tlm_state = TLM_RECEIVED;
 	}
 	HAL_UART_Receive_IT(huart, &uartRxBuffer, 1);
 }
 
-static inline uint8_t packROVVolt(uint16_t kissVolt) {
+static inline uint8_t packROVVolt(uint16_t kissVolt)
+{
 	if(kissVolt <= ROV_VOLT_MIN_KISS) {
 		return 0;
 	} else if(kissVolt >= ROV_VOLT_MAX_KISS) {
@@ -860,7 +912,9 @@ static inline uint8_t packROVVolt(uint16_t kissVolt) {
 	 */
 }
 
-void sendTelemetryData(void) {
+void sendTelemetryData(void)
+{
+	tlm_state = TLM_TRANSMITTING;
 	CanTxData canSendPacket;
 	canSendPacket.data[ROV_TEMP] = telemetryBuffer[KISS_TEMP];
 	uint16_t voltage = (uint16_t)((((uint16_t)telemetryBuffer[KISS_VOLT_HIGH]) << 8U) + telemetryBuffer[KISS_VOLT_LOW]);
@@ -876,10 +930,30 @@ void sendTelemetryData(void) {
 	SendCANMessage(&canSendPacket);
 }
 
+void requestTelemetry(uint8_t index)
+{
+	(&(htim3.Instance->CCR1))[index] = TLM_PULSE_COUNT;
+	tlm_state = TLM_REQUESTING;
+}
+
+void TIM3_TimeElapsedCallback(TIM_HandleTypeDef *_htim)
+{
+	(void)_htim;
+	if(tlm_state == TLM_REQUESTING) {
+		tlm_state = TLM_RECEIVING;
+		updatePwms(lastEscSpeeds);
+	}
+}
+
 void TIM16_TimeElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	// Set the flag for main to send telemetry data
-	sendTelemetry = 1;
+	if(telemetryBytesRecieved >= KISS_NO_CRC_COUNT) {
+		tlm_state = TLM_RECEIVED;
+	} else {
+		tlm_state = TLM_READY_TO_REQUEST;
+		telemetryEscIndex = telemetryEscIndex > 3 ? 0 : telemetryEscIndex + 1;
+	}
 
 	// Stop the timer.
 	HAL_TIM_Base_Stop_IT(htim);

@@ -23,7 +23,7 @@ and a guide for doing so.
 ##### Optimization
 Set optimization for Release builds to -03 rather than -Osize (the default). This setting is in
 Project > Properties > C/C++ Build > Settings > Tool Settings > MCU GCC Compiler > Optimization.
-This should only be done for Release builds. Debug builds should not be optimization
+This should only be done for Release builds. Debug builds should not be optimized.
 
 ##### Whitespace
 In Window > Preferences > C/C++ > Editor > Save Actions
@@ -32,3 +32,16 @@ In Window > Preferences > C/C++ > Editor > Save Actions
 * Check "Ensure newline at the end of file"
 
 This makes it easier to diff files in git and prevent unnecessary changes.
+
+
+#### CAN Message IDs
+
+| ID | Use |
+| --- | --- |
+| 0x201-0x203 | ESC control messages from Pi to quad ESCs 1-3 |
+| 0x204 | Solenoid control messages from Pi |
+| 0x205 | Brick communication from Pi |
+| 0x206 | ESC control messages to an ESC not in the system |
+| 0x301-0x30B | ESC telemetry info from each ESC w/i the quad ESC |
+| 0x311-0x313 | Microcontroller on the Quad ESC controller temperature (degrees C \* 4) |
+| 0x305 | Brick data from the microcontrollers |
